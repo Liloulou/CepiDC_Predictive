@@ -1,0 +1,149 @@
+import tensorflow as tf
+
+COL_NAMES = [
+    'Unnamed: 0', 'jdc', 'mdc', 'adc', 'jnais', 'mnais', 'anais', 'depdom',
+    'depdc', 'depnais', 'comdc', 'sexe', 'comnais', 'activ', 'comdom',
+    'etatmat', 'lieudc', 'jvecus', 'image', 'causeini', 'c1', 'c2', 'c3',
+    'c4', 'c5', 'c6', 'c7', 'c8', 'c9', 'c10', 'c11', 'c12', 'c13', 'c14',
+    'c15', 'c16', 'c17', 'c18', 'c19', 'c20', 'c21', 'c22', 'c23', 'c24'
+]
+
+COL_TYPES = [[0.]] * (6 + 1) + [['']] * 4 + [[0]] + \
+            [['']] + [[0]] + [['']] + [[0]] * 2 + \
+            [[0.]] + [[0]] + [['']] + [['']] * 24
+
+
+def _parse_line(line):
+    """
+    takes in a line of a csv file and returns its data as a feature dictionary
+    :param line: the csv file's loaded line
+    :return: the associated feature dictionary
+    """
+
+    fields = tf.decode_csv(line, record_defaults=COL_TYPES)
+    features = dict(zip(COL_NAMES, fields))
+
+    return features
+
+
+def _convert(tensor, key):
+    """
+    Converts a string into a 1d tensor of char if the variable is of ICD-10 form, or into a 2d sparse
+    tensor otherwise (for later sparse concatenation during _make_loc_variables()
+    :param
+    tensor: a tf.string
+    :return: the entry string's associated char sequence
+    """
+    cause_name_list = ['c' + str(i) for i in range(0, 25)] + ['causeini']
+
+    split = tf.string_split([tensor], delimiter='')
+
+    if key in cause_name_list:
+        split = tf.squeeze(
+            tf.sparse_to_dense(split.indices, [1, 4], split.values, default_value=''),
+            axis=0
+        )
+
+    return split
+
+
+def _convert_string_format(features):
+    """
+    Takes in a feature dictionary, and splits each features defined as a string into a sequence of char.
+    :param
+    dataset: dictionary of features
+    :return:
+    features: the dataset's features, with string format converted into char sequences
+    labels: The dataset's labels, converted into a sequence of char if necessary
+    """
+
+    for key in features.keys():
+        if features[key].dtype != tf.float32:
+            if features[key].dtype == tf.int32:
+                features[key] = features[key] - 1
+            else:
+                features[key] = _convert(features[key], key)
+
+    return features
+
+
+def _make_date_variables(features, date_keys):
+    """
+    turns a dataset's date type variables into quantitative sequences for simplicity
+    :param dataset: a feature dictinoary with date-like features, whose keys should be in format "a'date_name'" ,
+    "m'date_name'" and "j'date_name'" for a given date's year, month and day entries, respectively
+    :param date_keys: a dictionary containing every date_name present in the dataset
+    :return: the modified feature dictionary with each entry of type "a'date_name'" , "m'date_name'"
+    and "j'date_name'" replaced with an unique entry of key "date_'date_name'" pointing towards the date variable in
+    sequence format
+    """
+
+    for key in date_keys:
+        year = features.pop('a' + key)
+        month = features.pop('m' + key)
+        day = features.pop('j' + key)
+        features['date_' + key] = tf.expand_dims(tf.stack((year, month, day), axis=-1), axis=-1)
+
+    return features
+
+
+def _make_loc_variables(features, loc_keys):
+    """
+    turns a dataset's location type variables into char sequences for simplicity
+    :param dataset: a dictionary of features with location-like features, whose keys should be in format
+    "dep'loc_name'" and "com'loc_name'" for a given location's department and city codes respectively
+    :param loc_keys: a dictionary containing every loc_name present in the dataset
+    :return: a modified feature dict where each dictionary entry of type "dep'loc_name'" and "com'loc_name'" is
+    replaced with an unique entry of key "loc_'loc_name'" pointing towards the loc variable
+    """
+
+    for key in loc_keys:
+        dep = features.pop('dep' + key)
+        com = features.pop('com' + key)
+        stacked = tf.sparse_concat(axis=-1, sp_inputs=[dep, com])
+
+        features['loc_' + key] = tf.squeeze(
+            tf.sparse_to_dense(
+                sparse_indices=stacked.indices,
+                output_shape=[1, 5],
+                sparse_values=stacked.values,
+                default_value=''
+            ),
+            axis=0
+        )
+
+    return features
+
+
+def _preprocess(line):
+    """
+    Overheads all csv processing functions.
+    :param line: a raw csv line
+    :return:
+    """
+    data = _parse_line(line)
+    data = _convert_string_format(data)
+    data = _make_date_variables(data, ['dc', 'nais'])
+    data = _make_loc_variables(data, ['dom', 'dc', 'nais'])
+
+    labels = data.pop('causeini')
+
+    return data, labels
+
+
+def really_simple_input_fn(dataset_name, batch_size, num_epochs):
+    """
+    A predefined input function to feed an Estimator csv based cepidc files
+    :param dataset_name: the file's ending type (either 'train, 'valid' or 'test')
+    :param batch_size: the size of batches to feed the computational graph
+    :param num_epochs: the number of time the entire dataset should be exposed to a gradient descent iteration
+    :return: a BatchedDataset as a tuple of a feature dictionary and the labels
+    """
+
+    dataset = tf.data.TextLineDataset('data/cepidc_2013_' + dataset_name + '.csv').skip(1)
+
+    dataset = dataset.map(_preprocess)
+
+    dataset = dataset.shuffle(buffer_size=10000).batch(batch_size, drop_remainder=True).repeat(num_epochs)
+
+    return dataset
