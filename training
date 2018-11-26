@@ -3,7 +3,7 @@ import subprocess
 import pickle
 import numpy as np
 import my_input_fn as pipe
-import model_2 as model
+import model 
 from tensorflow.contrib import feature_column
 import os
 
