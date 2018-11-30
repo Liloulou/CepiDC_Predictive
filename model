@@ -1,5 +1,6 @@
 import tensorflow as tf
 from tensorflow.contrib import feature_column
+import my_input_fn as pipe
 import model_utils
 import custom_metrics
 
@@ -143,6 +144,38 @@ def basic_rnn_model(features, labels, params, mode, reuse=None):
     return decoder_out[0][0]
 
 
+def tcn_attention_rnn_model(features, labels, params, mode):
+    processed_codes_sequences = model_utils.causal_cause_net(
+        cause=features['cause'],
+        params=params['cause'],
+        mode=mode
+    )
+
+    encoder_out, encoder_state = model_utils.tcn_encoder(
+        encoder_in=processed_codes_sequences,
+        sequence_length=features['cause_len'],
+        params=params['encoder'],
+        mode=mode
+    )
+
+    encoder_state = model_utils.from_tcn_encoder_to_rnn_decoder_states(
+        encoder_state,
+        params=params,
+        mode=mode
+    )
+
+    logits = model_utils.basic_decoder(
+        encoder_out=encoder_out,
+        encoder_state=encoder_state,
+        sequence_length=features['cause_len'],
+        labels=labels,
+        params=params['decoder'],
+        mode=mode
+    )
+
+    return logits
+
+
 def conv_rnn_attention_model(features, labels, params, mode):
 
     processed_codes_sequences = model_utils.cause_net(
@@ -158,7 +191,7 @@ def conv_rnn_attention_model(features, labels, params, mode):
         mode=mode
     )
 
-    encoder_state = model_utils.from_encoder_to_decoder_states(
+    encoder_state = model_utils.from_rnn_encoder_to_decoder_states(
         encoder_states=encoder_state,
         params=params,
         mode=mode
@@ -205,10 +238,10 @@ def get_train_op(loss, params):
 
 def get_model_fn(features, labels, mode, params):
 
-    features, labels = make_input_layers((features, labels), params['feature_columns'])
+    features, labels = pipe.make_input_layers((features, labels), params['feature_columns'])
     labels_ind = tf.argmax(labels, axis=-1)
 
-    logits = conv_rnn_attention_model(features, labels, params['inference'], mode)
+    logits = tcn_attention_rnn_model(features, labels, params['inference'], mode)
     predictions = tf.argmax(logits, axis=-1)
     loss = get_loss(logits, labels_ind)
     train_op = get_train_op(loss, params['train'])
@@ -225,4 +258,3 @@ def get_model_fn(features, labels, mode, params):
         train_op=train_op,
         eval_metric_ops=eval_metrics
     )
-
