@@ -26,7 +26,7 @@ def make_training_labels(labels, batch_size):
     return tf.concat((go_symbol, train_labels), axis=1)
 
 
-def from_encoder_to_decoder_states(encoder_states, params, mode):
+def from_rnn_encoder_to_decoder_states(encoder_states, params, mode):
     """
     takes in the encoder's LSTM states, and modifies their size if required to fit the decoder's state sizes
     :param encoder_states: the encoder's LSTM final states. A list of LSTMStateTuple
@@ -65,6 +65,41 @@ def from_encoder_to_decoder_states(encoder_states, params, mode):
             )
 
             decoder_init_states.append(tf.nn.rnn_cell.LSTMStateTuple(cell_state, cell_out))
+
+    return tuple(decoder_init_states)
+
+
+def from_tcn_encoder_to_rnn_decoder_states(encoder_state, params, mode):
+    """
+    takes in the encoder's state, and converts it into a tuple of LSTMStateTuple to feed the decoder's RNN
+    :param encoder_state: the encoder's final state. A Tensor of size [batch_size, dim_state]
+    :param mode: a tf.estimator.ModeKeys
+    :param params: the decoder's hyperparameters. A dict with entry:
+            - 'decoder': dict with entry 'units', list of layer sizes (int)
+    :return: The decoder's LSTM initial states. A list of LSTMStateTuple
+        """
+    num_decoder_cell = len(params['decoder']['units'])
+    init = tf.contrib.layers.xavier_initializer(uniform=False)
+    decoder_init_states = []
+
+    for i in range(num_decoder_cell):
+
+        cell_state = tf.layers.dense(
+            encoder_state,
+            units=params['decoder']['units'][i],
+            kernel_initializer=init,
+            activity_regularizer=lambda x: tf.layers.batch_normalization(
+                inputs=x,
+                training=mode == tf.estimator.ModeKeys.TRAIN
+            )
+        )
+
+        cell_out = tf.zeros(
+            [encoder_state.get_shape()[0], params['decoder']['units'][i]],
+            dtype=tf.float32
+        )
+
+        decoder_init_states.append(tf.nn.rnn_cell.LSTMStateTuple(cell_state, cell_out))
 
     return tuple(decoder_init_states)
 
@@ -293,6 +328,7 @@ def causal_conv1d(inputs,
                   dilation_rate,
                   activation=None,
                   kernel_initializer=None,
+                  activity_regularizer=None,
                   name=None):
     """
     A dilated 1d convolutional layer padded to enable causal convolutions.
@@ -305,6 +341,7 @@ def causal_conv1d(inputs,
     :param dilation_rate: An int denoting the dilation rate for the conv operation
     :param activation: the network's activation function (applied post normalization)
     :param kernel_initializer: An initializer for the convolution kernel
+    :param activity_regularizer: An activity regularizer layer (typically a batch_norm layer)
     :param name: A string, the name of the layer
     :return:
     """
@@ -328,15 +365,9 @@ def causal_conv1d(inputs,
         filters=filters,
         kernel_size=kernel_size,
         dilation_rate=dilation_rate,
-        activation=None,
+        activation=activation,
         kernel_initializer=kernel_initializer,
-        activity_regularizer=lambda x: tf.contrib.layers.layer_norm(  #TODO ensure that begin_'' parameters are proper
-            x,
-            scale=False,
-            activation_fn=activation,
-            begin_norm_axis=1,
-            begin_params_axis=-1
-        ),
+        activity_regularizer=activity_regularizer,
         name=name
     )
 
@@ -358,10 +389,9 @@ def temporal_block(inputs,
     :param params: a dict of parameters with following entries:
                 - 'filters': A list int denoting the number of filters for each conv operation
                 - 'kernel': A list of int denoting the kernel size for each conv operation
+                - 'drop_out': The drop out probability for each layer
     :param dilation_rate: An int denoting the dilation rate for the conv operation
     :param kernel_initializer: An initializer for each convolution kernel
-    :param activity_regularizer: an activity regularizer to be applied to each conv op's output. Callable that takes in
-            one argument, the conv op's output
     :param mode: a tf.estimator.ModeKeys
     :param name: A string, the name of the layer
     :return:
@@ -373,10 +403,8 @@ def temporal_block(inputs,
     # in parallel
     if input_rank == 4:
         conv_fn = tf.layers.conv2d
-        noise_shape = [inputs.shape[0], inputs.shape[1], inputs.shape[2], tf.constant(1)]
     else:
         conv_fn = tf.layers.conv1d
-        noise_shape = [inputs.shape[0], inputs.shape[1], tf.constant(1)]
 
     out = inputs
     with tf.name_scope('dilated_convolutions'):
@@ -388,8 +416,16 @@ def temporal_block(inputs,
                 dilation_rate=dilation_rate,
                 activation=tf.nn.leaky_relu,
                 kernel_initializer=kernel_initializer,
+                activity_regularizer=lambda x: tf.layers.batch_normalization(
+                    inputs=x,
+                    scale=False,
+                    training=mode == tf.estimator.ModeKeys.TRAIN
+                ),
                 name=name + '_conv_' + str(i)
             )
+
+            noise_shape = [tf.constant(1)] * (input_rank-1)
+            noise_shape.append(tf.constant(params['filters'][i]))
 
             out = tf.layers.dropout(
                 out,
@@ -416,7 +452,7 @@ def temporal_block(inputs,
 def causal_cause_net(cause, params, mode):
     """
     Processes each ICD-10 code individually to convert it into a rich, dense representation using
-    dilated convolutional neural nets
+    dilated causal convolutions
     :param cause: the stacked ICD-10 codes represented by a one-hot tensor of shape [batch_size, 4, seq_length, 36]
     :param mode: a tf.estimator.ModeKeys
     :param params: the model's hyperparameters represented as a dict with entries:
@@ -460,7 +496,7 @@ def causal_cause_net(cause, params, mode):
             out = tf.layers.conv2d(
                 inputs=out,
                 filters=params['units'],
-                kernel_size=(10, 1),
+                kernel_size=(4, 1),
                 padding='valid',
                 activation=tf.nn.leaky_relu,
                 kernel_initializer=init,
@@ -603,3 +639,52 @@ def basic_decoder(encoder_out, encoder_state, sequence_length, labels, params, m
         )
 
     return decoder_out[0][0]
+
+
+def tcn_encoder(encoder_in, sequence_length, params, mode):
+    """
+            Takes in the dense representation of the ICD-10 codes and feeds it to a multilayer LSTM RNN to be used as the
+            encoder of a seq2seq model
+            :param encoder_in: the output of the cause network. A Tensor of shape [batch_size, max_seq_length, dim_cause]
+            :param sequence_length: a rank one vector containing the length of each causal chain present in the batch
+            :param params: the model's hyperparameters (same for each individual block) represented as a dict with entries:
+                            - 'kernel' list of int defining each layer's kernel size
+                            - 'dimension' either 1 or 2, the dimension of the convolution
+                            - 'drop_out' the dropout probability of the blocks' layers
+            :param mode: a tf.estimator.ModeKeys
+            :return: - The encoded causal sequence, a Tensor of shape [batch_size, max_seq_length, params['units'][-1]
+                     - An equivalent of an RNN state tensor (time axis reduced mean of the encoded causal sequence)
+        """
+    print('bonjour')
+    out = encoder_in
+    init = tf.contrib.layers.xavier_initializer(uniform=False)
+
+    # 5 res_blocks because log2(max_seq_len) = 4.6
+    for i in range(5):
+        out = temporal_block(
+            out,
+            params=params,
+            dilation_rate=2 ** i,
+            kernel_initializer=init,
+            mode=mode,
+            name='tcn_encoder_block_' + str(i)
+        )
+
+    sequence_mask = tf.one_hot(
+        sequence_length,
+        depth=tf.reduce_max(sequence_length),
+        on_value=1.0,
+        off_value=0.0
+    )
+
+    sequence_mask = tf.cumprod(
+        1 - sequence_mask,
+        axis=-1
+    )
+    out = out * tf.expand_dims(sequence_mask, axis=-1)
+
+    print(out)
+
+    state = tf.reduce_sum(out, axis=-2) / tf.expand_dims(tf.cast(sequence_length, tf.float32), axis=-1)
+
+    return out, state
