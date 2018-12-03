@@ -187,10 +187,12 @@ for i in range(20):
     )
 
     tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
+    
     pickle.dump(
         hparams,
         open(
-            'model_directory/' + next_model_dir + '/h_parameters_' + next_model_dir[next_model_dir.find('_') + 1:],
+            'data/' + '/h_parameters/h_params_' + next_model_dir[next_model_dir.find('_') + 1:],
             'wb'
         )
     )
+
