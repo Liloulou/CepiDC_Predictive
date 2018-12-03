@@ -14,20 +14,6 @@ misc_bucket_sizes = {'sexe': 2, 'activ': 3, 'etatmat': 4, 'lieudc': 6}
 cause_chain = ['c' + str(x) for x in range(1, 25)]
 
 
-def compute_len(tensor):
-    """
-    Takes in the current batch of causal chain input and outputs each individual's causal chain length
-    :param tensor: a 4D tensor of dimension [batch_size, code_size, number of causes, encoding_size] containing the
-    causal chain's ICD-10 one hot encodings as alphadecimal characters (36 states)
-    :return: a 1D tensor of dimension [batch_size] containing each individual's causal chain length
-    """
-
-    first = tf.cast(tf.equal(tf.reduce_max(tensor, axis=-1), 1), tf.int32)
-    second = tf.reduce_max(first, axis=-2)
-
-    return tf.reduce_sum(second, axis=-1)
-
-
 def make_input_layers(dataset, feature_columns):
     feature_dict = {}
 
@@ -51,7 +37,7 @@ def make_input_layers(dataset, feature_columns):
             cause_input.append(feature_column.sequence_input_layer(features, cause_column, trainable=False)[0])
 
         feature_dict['cause'] = tf.stack(cause_input, axis=-2)
-        feature_dict['cause_len'] = compute_len(feature_dict['cause'])
+        feature_dict['cause_len'] = pipe.compute_len(feature_dict['cause'])
         feature_dict['cause'] = feature_dict['cause'][:, :4, :tf.reduce_max(feature_dict['cause_len'])]
 
     with tf.name_scope('labels_one_hot_encoding'):
@@ -176,6 +162,76 @@ def tcn_attention_rnn_model(features, labels, params, mode):
     return logits
 
 
+def full_data_tcn_attention_rnn_model(features, labels, params, mode):
+
+    with tf.name_scope('cause_network'):
+
+        cause_out = model_utils.cause_causal_net(
+            cause=features['cause'],
+            params=params['cause'],
+            mode=mode
+        )
+
+    with tf.name_scope('date_network'):
+
+        date_out = model_utils.date_causal_net(
+            date=features['date'],
+            params=params['date'],
+            mode=mode
+        )
+
+    with tf.name_scope('loc_network'):
+
+        loc_out = model_utils.entry_net(
+            features['loc'],
+            params=params['loc'],
+            mode=mode,
+            key='loc'
+        )
+
+    with tf.name_scope('misc_network'):
+
+        misc_out = model_utils.entry_net(
+            features['misc'],
+            params=params['misc'],
+            mode=mode,
+            key='misc'
+        )
+
+    with tf.name_scope('encoder'):
+        encoder_out, encoder_state = model_utils.tcn_encoder(
+            encoder_in=cause_out,
+            sequence_length=features['cause_len'],
+            params=params['encoder'],
+            mode=mode
+        )
+
+    with tf.name_scope('decoder_state_network'):
+        non_cause = model_utils.non_cause_net(
+            [date_out, loc_out, misc_out],
+            params=params['state'],
+            mode=mode,
+        )
+
+        encoder_state = model_utils.from_tcn_encoder_to_rnn_decoder_states(
+            [encoder_state, non_cause],
+            params=params,
+            mode=mode
+        )
+
+    with tf.name_scope('decoder'):
+        logits = model_utils.basic_decoder(
+            encoder_out=encoder_out,
+            encoder_state=encoder_state,
+            sequence_length=features['cause_len'],
+            labels=labels,
+            params=params['decoder'],
+            mode=mode
+        )
+
+    return logits
+
+
 def conv_rnn_attention_model(features, labels, params, mode):
 
     processed_codes_sequences = model_utils.cause_net(
@@ -241,7 +297,7 @@ def get_model_fn(features, labels, mode, params):
     features, labels = pipe.make_input_layers((features, labels), params['feature_columns'])
     labels_ind = tf.argmax(labels, axis=-1)
 
-    logits = tcn_attention_rnn_model(features, labels, params['inference'], mode)
+    logits = full_data_tcn_attention_rnn_model(features, labels, params['inference'], mode)
     predictions = tf.argmax(logits, axis=-1)
     loss = get_loss(logits, labels_ind)
     train_op = get_train_op(loss, params['train'])
