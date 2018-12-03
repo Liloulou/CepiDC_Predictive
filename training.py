@@ -17,32 +17,50 @@ hparams = {
             'decay_steps': 2000
         },
         'inference': {
-            'misc': {
-                'units': [50, 30],
-                'keep_prob': [0.01, 0.01]
-            },
+            'misc': [
+                {
+                    'units': [10, 10],
+                    'drop_out': 0.01
+                },
+                {
+                    'units': [10, 10],
+                    'drop_out': 0.01
+                },
+            ],
             'date': {
-                'filters': [50, 50],
-                'kernel': [2, 3],
-                'units': [50, 30],
-                'keep_prob': [0.01, 0.01]
+                'block': [
+                    {
+                        'filters': [10, 10],
+                        'kernel': [2, 2] ,
+                        'drop_out': 0.01
+                    },
+                    {
+                        'filters': [10, 10],
+                        'kernel': [2, 2],
+                        'drop_out': 0.01
+                    },
+                ],
+                'units': 10,
+                'drop_out': 0.01
             },
-            'loc': {
-                'filters': [70, 70],
-                'kernel': [2, 3],
-                'units': [50, 30],
-                'keep_prob': [0.01, 0.01]
-            },
+            'loc': [
+                {
+                    'units': [10, 10],
+                    'drop_out': 0.01
+                },
+                {
+                    'units': [10, 10],
+                    'drop_out': 0.01
+                },
+            ],
             'cause': {
                 'block': [
                     {
-                        'dimension': 2,
                         'filters': [5, 5],
                         'kernel': [2, 3],
                         'drop_out': 0.01
                     },
                     {
-                        'dimension': 2,
                         'filters': [5, 5],
                         'kernel': [2, 3],
                         'drop_out': 0.01
@@ -51,8 +69,25 @@ hparams = {
                 'units': 10,
                 'drop_out': 0.01
             },
+            'state': {
+                'units': 10,
+                'drop_out': 0.01,
+                'block': [
+                    {
+                        'units': [5, 5],
+                        'drop_out': 0.01
+                    },
+                    {
+                        'units': [5, 5],
+                        'drop_out': 0.01
+                    },
+                    {
+                        'units': [5, 5],
+                        'drop_out': 0.01
+                    }
+                ]
+            },
             'encoder': {
-                'dimension': 1,
                 'filters': [5, 5],
                 'kernel': [3, 3],
                 'drop_out': 0.01
@@ -64,7 +99,6 @@ hparams = {
             }
         }
     }
-
 
 def get_next_model_dir():
     list_name = [int(name[name.find('_') + 1:]) for name in os.listdir('model_directory')]
