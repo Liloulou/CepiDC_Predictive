@@ -84,18 +84,36 @@ def from_tcn_encoder_to_rnn_decoder_states(encoder_state, params, mode):
 
     for i in range(num_decoder_cell):
 
-        cell_state = tf.layers.dense(
-            encoder_state,
-            units=params['decoder']['units'][i],
-            kernel_initializer=init,
-            activity_regularizer=lambda x: tf.layers.batch_normalization(
-                inputs=x,
-                training=mode == tf.estimator.ModeKeys.TRAIN
+        if type(encoder_state) == list:
+            cell_state = []
+
+            for j in range(len(encoder_state)):
+
+                cell_state.append(tf.layers.dense(
+                    encoder_state[j],
+                    units=params['decoder']['units'][i],
+                    kernel_initializer=init,
+                    activity_regularizer=lambda x: tf.layers.batch_normalization(
+                        inputs=x,
+                        training=mode == tf.estimator.ModeKeys.TRAIN
+                    )
+                ))
+
+            cell_state = tf.add_n(cell_state)
+
+        else:
+            cell_state = tf.layers.dense(
+                encoder_state,
+                units=params['decoder']['units'][i],
+                kernel_initializer=init,
+                activity_regularizer=lambda x: tf.layers.batch_normalization(
+                    inputs=x,
+                    training=mode == tf.estimator.ModeKeys.TRAIN
+                )
             )
-        )
 
         cell_out = tf.zeros(
-            [encoder_state.get_shape()[0], params['decoder']['units'][i]],
+            [cell_state.get_shape()[0], params['decoder']['units'][i]],
             dtype=tf.float32
         )
 
@@ -104,222 +122,58 @@ def from_tcn_encoder_to_rnn_decoder_states(encoder_state, params, mode):
     return tuple(decoder_init_states)
 
 
-def entry_net(features, mode, params, key):
-
-    out = features
-    params = params[key]
-
-    with tf.name_scope(key + '_network'):
-        if 'filters' in params.keys():
-            with tf.name_scope('conv_stage'):
-                init = tf.contrib.layers.xavier_initializer(uniform=False)
-                for i in range(len(params['filters'])):
-                    out = tf.layers.conv2d(
-                        inputs=out,
-                        filters=params['filters'][i],
-                        kernel_size=(params['kernel'][i], 1),
-                        padding='same',
-                        activation=tf.nn.leaky_relu,
-                        kernel_initializer=init,
-                        activity_regularizer=lambda x: tf.layers.batch_normalization(
-                            inputs=x,
-                            scale=False,
-                            training=mode == tf.estimator.ModeKeys.TRAIN
-                        ),
-                        name=key + '_conv_layer_' + str(i)
-                    )
-                # skip connection from the inputs to the conv stage output
-                out += tf.layers.conv2d(
-                    inputs=features,
-                    filters=params['filters'][-1],
-                    kernel_size=1,
-                    padding='same',
-                    activation=None,
-                    kernel_initializer=init,
-                    activity_regularizer=lambda x: tf.layers.batch_normalization(
-                        inputs=x,
-                        scale=False,
-                        training=mode == tf.estimator.ModeKeys.TRAIN
-                    ),
-                    name=key + '_conv_skip_connection'
-                )
-
-                # batch normalization before injecting into the dense_stage
-                out = tf.layers.batch_normalization(
-                    inputs=out,
-                    scale=False,
-                    training=mode == tf.estimator.ModeKeys.TRAIN,
-                    name=key + '_conv_out'
-                )
-                out = tf.layers.flatten(out)
-
-        with tf.name_scope('dense_stage'):
-            init = tf.variance_scaling_initializer(scale=1.0, mode='fan_in')
-
-            conv_out = out
-            for i in range(len(params['units'])):
-                out = tf.layers.dense(
-                    inputs=out,
-                    units=params['units'][i],
-                    activation=tf.nn.selu,
-                    kernel_initializer=init,
-                    activity_regularizer=lambda x: tf.cond(
-                        pred=tf.equal(mode, tf.estimator.ModeKeys.TRAIN),
-                        true_fn=lambda: tf.contrib.nn.alpha_dropout(x, keep_prob=params['keep_prob'][i]),
-                        false_fn=lambda: x
-                    ),
-                    name=key + '_dense_layer_' + str(i)
-                )
-
-            # skip connection from the conv stage output to the dense stage output
-            if 'filters' in params.keys():
-                residual = tf.layers.dense(
-                    inputs=conv_out,
-                    units=params['units'][-1],
-                    kernel_initializer=init,
-                    name=key + '_dense_skip_connection',
-                )
-                out += residual
-
-    return out
-
-
-def res_block(features, params, dilation_power, init, mode):
+def res_block(features, params, init, mode, name=None):
     """
-    A residual block implementation with dilated convolution layers.
-    A matrix multiplication for the residual to ensure channel size compatibility
-    :param features: the block's input
-    :param params: the block's hyperparamater. dict with entries:
-                        - 'filters' list of int defining each layer's number of filters
-                        - 'kernel' list of int defining each layer's kernel size
-                        - 'dimension' either 1 or 2, the dimension of the convolution
-                        - 'drop_out' the dropout probability of the block's layer
-    :param dilation_power: the dilation power to be used for
-    :param init:
-    :param mode:
-    :return:
+    :param features: the input features to the residual block
+    :param params: the block's hyperparameters. A dictionary with entries:
+                    - 'units' a list of int defining the block layers' number of neurons
+                    - 'drop_out' an int defining the dropout rate for every layer in the current block
+    :param init: A neural layer initializer (typically tf.contrib.xavier_initializer)
+    :param mode: A tf.estimator.ModeKeys
+    :param name: A string defining the block's name
+    :return: The residual block's output. A tensor of same rank as input, whose shape is identical except for the last
+    dimension where it is defined as the last 'units' parameter
     """
-
-    assert params['dimension'] in [1, 2]
-
-    if params['dimension'] == 1:
-        conv_fn = tf.layers.conv1d
-    else:
-        conv_fn = tf.layers.conv2d
-
     out = features
+    input_rank = len(out.get_shape())
 
-    with tf.name_scope('res_bloc_' + str(dilation_power)):
-        for i in range(len(params['filters'])):
+    with tf.name_scope('dense_block'):
 
-            if params['dimension'] == 1:
-                kernel_size = params['kernel'][i]
-            else:
-                kernel_size = (params['kernel'][i], 1)
+        for i in range(len(params['units'])):
+            noise_shape = [tf.constant(1)] * (input_rank - 1)
+            noise_shape.append(tf.constant(params['units'][i]))
 
-            out = conv_fn(
-                inputs=out,
-                filters=params['filters'][i],
-                kernel_size=kernel_size,
-                padding='same',
-                dilation_rate=2 ** dilation_power,
+            out = tf.layers.dense(
+                out,
+                units=params['units'][i],
                 activation=tf.nn.leaky_relu,
                 kernel_initializer=init,
                 activity_regularizer=lambda x: tf.layers.batch_normalization(
-                    inputs=x,
-                    scale=False,
+                    x,
                     training=mode == tf.estimator.ModeKeys.TRAIN
                 ),
-                name='res_block_' + str(dilation_power) + '_layer_' + str(i)
+                name=name + "_dense_" + str(i)
             )
+
             out = tf.layers.dropout(
-                inputs=out,
+                out,
                 rate=params['drop_out'],
+                noise_shape=noise_shape,
                 training=mode == tf.estimator.ModeKeys.TRAIN
             )
 
-        out += conv_fn(
-            inputs=features,
-            filters=params['filters'][-1],
-            kernel_size=1,
-            padding='same',
-            kernel_initializer=init,
-            name='residual_' + str(dilation_power)
-            )
-
-    return out
-
-
-def cause_net(cause, params, mode):
-    """
-    Processes each ICD-10 code individually to convert it into a rich, dense representation using
-    dilated convolutional neural nets
-    :param cause: the stacked ICD-10 codes represented by a one-hot tensor of shape [batch_size, 4, seq_length, 36]
-    :param mode: a tf.estimator.ModeKeys
-    :param params: the model's hyperparamater represented as a dict with entries:
-                        - 'block': a list of dictionaries containing parameters for each residual block
-                        - 'units': the network output's dimensionality for each ICD-10 code
-                        - 'drop_out': the dropout probability for the sequence conversion layer
-    :return: A sequence of output vectors of shape [batch_size, sequence_length, 'parars['units]
-    """
-
-    out = cause
-
-    with tf.name_scope('cause_network'):
-
-        init = tf.contrib.layers.xavier_initializer(uniform=False)
-
-        with tf.name_scope('temporal_convolution_stage'):
-
-            for i in range(len(params['block'])):
-                out = res_block(
-                    out,
-                    params=params['block'][i],
-                    dilation_power=i,
-                    init=init,
-                    mode=mode
-                )
-
-            # skip connection from the inputs to the conv stage output
-            out += tf.layers.conv2d(
-                inputs=cause,
-                filters=params['block'][-1]['filters'][-1],
-                kernel_size=1,
-                padding='same',
-                activation=None,
+    with tf.name_scope('residuals'):
+        if params['units'][-1] == features.get_shape()[-1]:
+            residuals = features
+        else:
+            residuals = tf.layers.dense(
+                features,
+                units=params['units'][-1],
                 kernel_initializer=init,
-                activity_regularizer=lambda x: tf.layers.batch_normalization(
-                    inputs=x,
-                    scale=False,
-                    training=mode == tf.estimator.ModeKeys.TRAIN
-                )
+                name=name + '_residuals'
             )
 
-        with tf.name_scope('causal_sequence_conversion'):
-
-            out = tf.layers.conv2d(
-                inputs=out,
-                filters=params['units'],
-                kernel_size=(4, 1),
-                padding='valid',
-                activation=tf.nn.leaky_relu,
-                kernel_initializer=init,
-                activity_regularizer=lambda x: tf.layers.batch_normalization(
-                    inputs=x,
-                    scale=False,
-                    training=mode == tf.estimator.ModeKeys.TRAIN
-                ),
-                name='causal_net_out_unsqueezed'
-            )
-            out = tf.layers.dropout(
-                inputs=out,
-                rate=params['drop_out'],
-                training=mode == tf.estimator.ModeKeys.TRAIN
-            )
-
-    out = tf.squeeze(out, axis=1, name='causal_net_out')
-
-    return out
+    return out + residuals
 
 
 def causal_conv1d(inputs,
@@ -418,7 +272,6 @@ def temporal_block(inputs,
                 kernel_initializer=kernel_initializer,
                 activity_regularizer=lambda x: tf.layers.batch_normalization(
                     inputs=x,
-                    scale=False,
                     training=mode == tf.estimator.ModeKeys.TRAIN
                 ),
                 name=name + '_conv_' + str(i)
@@ -449,7 +302,103 @@ def temporal_block(inputs,
     return out + residuals
 
 
-def causal_cause_net(cause, params, mode):
+def entry_net(features, mode, params, key):
+    out = features
+    init = tf.contrib.layers.xavier_initializer(uniform=False)
+
+    with tf.name_scope(key + '_network'):
+        for i in range(len(params)):
+            out = res_block(
+                out,
+                params=params[i],
+                init=init,
+                mode=mode,
+                name=key + '_dense_block_' + str(i)
+            )
+
+    with tf.name_scope(key + '_input_residual'):
+        residual = tf.layers.dense(
+            out,
+            units=params[-1]['units'][0],
+            kernel_initializer=init,
+            activity_regularizer=lambda x: tf.layers.batch_normalization(
+                x,
+                training=mode == tf.estimator.ModeKeys.TRAIN
+            ),
+            name=key + '_residuals'
+        )
+
+    return out + residual
+
+
+def date_causal_net(date, params, mode):
+    """
+    Processes each date code individually to convert it into a rich, dense representation using
+    dilated causal convolutions
+    :param date: the stacked dates represented by a dense tensor of shape [batch_size, 2, seq_length, 1]
+    :param mode: a tf.estimator.ModeKeys
+    :param params: the model's hyperparameters represented as a dict with entries:
+                        - 'block': a list of dictionaries containing parameters for each residual block
+                        - 'units': the network output's dimensionality for each ICD-10 code
+                        - 'drop_out': the dropout probability for the sequence conversion layer
+    :return: A sequence of output vectors of shape [batch_size, sequence_length, params['units']]
+    """
+    out = date
+
+    with tf.name_scope('date_network'):
+        init = tf.contrib.layers.xavier_initializer(uniform=False)
+
+        with tf.name_scope('temporal_convolution_stage'):
+            for i in range(len(params['block'])):
+                out = temporal_block(
+                    out,
+                    params['block'][i],
+                    dilation_rate=2 ** i,
+                    kernel_initializer=init,
+                    mode=mode,
+                    name='date_net_temporal_block_' + str(i)
+                )
+
+            # skip connection from the inputs to the conv stage output
+            out += tf.layers.conv2d(
+                inputs=date,
+                filters=params['block'][-1]['filters'][-1],
+                kernel_size=1,
+                padding='same',
+                activation=None,
+                kernel_initializer=init,
+                activity_regularizer=lambda x: tf.layers.batch_normalization(
+                    inputs=x,
+                    training=mode == tf.estimator.ModeKeys.TRAIN
+                )
+            )
+
+        with tf.name_scope('date_sequence_conversion'):
+            out = tf.layers.conv2d(
+                inputs=out,
+                filters=params['units'],
+                kernel_size=(out.get_shape()[1], 1),
+                padding='valid',
+                activation=tf.nn.leaky_relu,
+                kernel_initializer=init,
+                activity_regularizer=lambda x: tf.layers.batch_normalization(
+                    inputs=x,
+                    training=mode == tf.estimator.ModeKeys.TRAIN
+                ),
+                name='date_net_out_unsqueezed'
+            )
+            out = tf.layers.dropout(
+                inputs=out,
+                rate=params['drop_out'],
+                training=mode == tf.estimator.ModeKeys.TRAIN
+            )
+
+    out = tf.squeeze(out, axis=1, name='date_net_out')
+
+    return out
+
+
+def cause_causal_net(cause, params, mode):
     """
     Processes each ICD-10 code individually to convert it into a rich, dense representation using
     dilated causal convolutions
@@ -459,7 +408,7 @@ def causal_cause_net(cause, params, mode):
                         - 'block': a list of dictionaries containing parameters for each residual block
                         - 'units': the network output's dimensionality for each ICD-10 code
                         - 'drop_out': the dropout probability for the sequence conversion layer
-    :return: A sequence of output vectors of shape [batch_size, sequence_length, 'parars['units]
+    :return: A sequence of output vectors of shape [batch_size, sequence_length, params['units']]
     """
     out = cause
 
@@ -487,7 +436,6 @@ def causal_cause_net(cause, params, mode):
                 kernel_initializer=init,
                 activity_regularizer=lambda x: tf.layers.batch_normalization(
                     inputs=x,
-                    scale=False,
                     training=mode == tf.estimator.ModeKeys.TRAIN
                 )
             )
@@ -502,7 +450,6 @@ def causal_cause_net(cause, params, mode):
                 kernel_initializer=init,
                 activity_regularizer=lambda x: tf.layers.batch_normalization(
                     inputs=x,
-                    scale=False,
                     training=mode == tf.estimator.ModeKeys.TRAIN
                 ),
                 name='causal_net_out_unsqueezed'
@@ -514,6 +461,56 @@ def causal_cause_net(cause, params, mode):
             )
 
     out = tf.squeeze(out, axis=1, name='causal_net_out')
+
+    return out
+
+
+def non_cause_net(inputs, params, mode):
+    out = inputs
+    init = tf.contrib.layers.xavier_initializer(uniform=False)
+
+    with tf.name_scope('standardization'):
+
+        for i in range(len(inputs)):
+            out[i] = tf.layers.dense(
+                out[i],
+                units=params['units'],
+                activation=tf.nn.leaky_relu,
+                kernel_initializer=init,
+                name='standardization_layer_' + str(i)
+            )
+
+            if len(out[i].get_shape()) > 2:
+                out[i] = tf.reduce_sum(
+                    out[i],
+                    axis=1
+                )
+
+    with tf.name_scope('additive_mix'):
+        out = tf.add_n(
+            out,
+            name='standardized_out'
+        )
+        out = tf.layers.batch_normalization(
+            out,
+            training=mode == tf.estimator.ModeKeys.TRAIN
+        )
+        out = tf.layers.dropout(
+            out,
+            rate=params['drop_out'],
+            training=mode == tf.estimator.ModeKeys.TRAIN
+        )
+
+    with tf.name_scope('non_cause_residual_network'):
+
+        for i in range(len(params['block'])):
+            out = res_block(
+                out,
+                params=params['block'][i],
+                init=init,
+                mode=mode,
+                name='state_network_residual_block' + str(i)
+            )
 
     return out
 
@@ -649,13 +646,12 @@ def tcn_encoder(encoder_in, sequence_length, params, mode):
             :param sequence_length: a rank one vector containing the length of each causal chain present in the batch
             :param params: the model's hyperparameters (same for each individual block) represented as a dict with entries:
                             - 'kernel' list of int defining each layer's kernel size
-                            - 'dimension' either 1 or 2, the dimension of the convolution
                             - 'drop_out' the dropout probability of the blocks' layers
             :param mode: a tf.estimator.ModeKeys
             :return: - The encoded causal sequence, a Tensor of shape [batch_size, max_seq_length, params['units'][-1]
                      - An equivalent of an RNN state tensor (time axis reduced mean of the encoded causal sequence)
         """
-    print('bonjour')
+
     out = encoder_in
     init = tf.contrib.layers.xavier_initializer(uniform=False)
 
