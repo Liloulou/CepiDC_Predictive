@@ -314,3 +314,53 @@ def get_model_fn(features, labels, mode, params):
         train_op=train_op,
         eval_metric_ops=eval_metrics
     )
+
+def get_model_fn_beam_search(features, labels, mode, params):
+
+    features, labels = pipe.make_input_layers((features, labels), params['feature_columns'])
+    labels_ind = tf.argmax(labels, axis=-1)
+
+    logits = full_data_tcn_attention_rnn_model(features, labels, params['inference'], mode)
+
+    if mode == tf.estimator.ModeKeys.TRAIN:
+
+        loss = get_loss(logits, labels_ind)
+        train_op = get_train_op(loss, params['train'])
+
+        return tf.estimator.EstimatorSpec(
+            mode,
+            loss=loss,
+            train_op=train_op,
+        )
+
+    else:
+        print(logits)
+        predictions = logits.predicted_ids[:, :, 0]
+        print(predictions)
+        top_5_predictions = logits.predicted_ids[:, :, :5]
+        beam_out = logits.beam_search_decoder_output,
+        loss = tf.reduce_mean(beam_out[0][0])
+
+        eval_metrics = {
+            'char_accuracy': tf.metrics.accuracy(labels_ind, predictions),
+            'cim_10_accuracy': custom_metrics.word_level_accuracy(labels_ind, predictions, name='CIM_10_accuracy'),
+            'top_5_accuracy': custom_metrics.top_5_accuracy(
+                tf.tile(
+                    tf.expand_dims(
+                        labels_ind,
+                        axis=-1
+                    ),
+                    multiples=[1, 1, 5]
+                ),
+                top_5_predictions,
+                name='top_5_accuracy'
+            )
+        }
+
+        return tf.estimator.EstimatorSpec(
+            mode,
+            predictions=predictions,
+            loss=loss,
+            eval_metric_ops=eval_metrics
+        )
+    
