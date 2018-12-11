@@ -638,6 +638,129 @@ def basic_decoder(encoder_out, encoder_state, sequence_length, labels, params, m
     return decoder_out[0][0]
 
 
+def attention_beam_search_decoder(encoder_out, encoder_state, sequence_length, labels, params, mode):
+    """
+        Basic decoder for seq2seq models.
+        :param encoder_out: the encoder's output
+        :param encoder_state: the encoder's output state (LSTMTuple)
+        :param sequence_length: the encoder outputs' lengths. a tensor of shape [batch_size]
+        :param labels: the output's ground truth (used by decoder helper in training mode)
+        :param params: a dict with entries:
+                        - 'units' a list of int defining each LSTM layer's size
+                        - 'drop_out': a float to be used as drop out keep prob parameter during training. The same value is
+                          used for every layer for simplicity
+                        - 'bahdanau' an int that defines the attention mechanism's size
+        :param mode: a tf.estimator.ModeKeys
+        :return: the model's ICD-10 predictions
+        """
+
+    batch_size = labels.get_shape()[0]
+
+    with tf.name_scope('decoder_cell'):
+        decoder_cells = []
+        for i in range(len(params['units'])):
+            cell = tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(
+                params['units'][i]
+            )
+            cell = tf.nn.rnn_cell.DropoutWrapper(
+                cell,
+                output_keep_prob=params['drop_out'] ** (mode == tf.estimator.ModeKeys.TRAIN),
+            )
+            decoder_cells.append(cell)
+
+        decoder_cell = tf.nn.rnn_cell.MultiRNNCell(decoder_cells)
+
+    train_labels = make_training_labels(labels, batch_size)
+
+    if mode != tf.estimator.ModeKeys.TRAIN:
+
+        encoder_out = tf.contrib.seq2seq.tile_batch(
+            encoder_out,
+            multiplier=params['beam_width']
+        )
+
+        encoder_state = tf.contrib.seq2seq.tile_batch(
+            encoder_state,
+            multiplier=params['beam_width']
+        )
+
+        sequence_length = tf.contrib.seq2seq.tile_batch(
+            sequence_length,
+            multiplier=params['beam_width']
+        )
+
+    if 'bahdanau' in list(params.keys()):
+        with tf.name_scope('attention_cell'):
+            attention_cell = tf.contrib.seq2seq.BahdanauAttention(
+                num_units=params['bahdanau'],
+                memory=encoder_out,
+                memory_sequence_length=sequence_length,
+                dtype=tf.float32
+            )
+
+            decoder_cell = tf.contrib.seq2seq.AttentionWrapper(
+                cell=decoder_cell,
+                attention_mechanism=attention_cell,
+                attention_layer_size=params['bahdanau']
+            )
+
+    with tf.name_scope('decoder'):
+
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            helper = tf.contrib.seq2seq.TrainingHelper(train_labels, sequence_length=[5] * batch_size)
+
+            initial_state = decoder_cell.zero_state(batch_size=batch_size, dtype=tf.float32)
+            initial_state = initial_state.clone(cell_state=encoder_state)
+
+            decoder = tf.contrib.seq2seq.BasicDecoder(
+                decoder_cell,
+                helper,
+                initial_state=initial_state,
+                output_layer=tf.layers.Dense(
+                    units=38,
+                )
+            )
+
+            decoder_out = tf.contrib.seq2seq.dynamic_decode(
+                decoder=decoder,
+                impute_finished=True,
+                maximum_iterations=4,
+            )
+
+            decode_out = decoder_out[0][0]
+
+        else:
+
+            initial_state = decoder_cell.zero_state(
+                batch_size=batch_size * params['beam_width'],
+                dtype=tf.float32
+            )
+            initial_state = initial_state.clone(cell_state=encoder_state)
+
+            decoder = tf.contrib.seq2seq.BeamSearchDecoder(
+                decoder_cell,
+                embedding=lambda x: tf.one_hot(x, depth=38),
+                start_tokens=tf.ones([batch_size], dtype=tf.int32) * GO_SYMBOL,
+                end_token=EOS_SYMBOL,
+                initial_state=initial_state,
+                beam_width=params['beam_width'],
+                output_layer=tf.layers.Dense(
+                    units=38,
+                )
+            )
+
+            decoder_out = tf.contrib.seq2seq.dynamic_decode(
+                decoder=decoder,
+                impute_finished=False,
+                maximum_iterations=4,
+            )
+
+            decode_out = decoder_out[0]
+
+    return decode_out
+
+
+
 def tcn_encoder(encoder_in, sequence_length, params, mode):
     """
             Takes in the dense representation of the ICD-10 codes and feeds it to a multilayer LSTM RNN to be used as the
