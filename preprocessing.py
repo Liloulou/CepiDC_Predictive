@@ -117,7 +117,9 @@ def clean_dataset(dataset):
         'nat3',
         'depnais',
         'comnais',
-        'situat', 'agexact'])
+        'situat',
+        'agexact'
+    ],axis=1)
 
     cause_chain_columns = []
     for i in range(2, 25):
@@ -129,6 +131,8 @@ def clean_dataset(dataset):
     row_with_missing = dataset[other_columns].isnull()
 
     dataset = dataset.loc[~row_with_missing.any(1)]
+
+    dataset = dataset.loc[~dataset[other_columns].isnull().any(1)]
 
     return dataset
 
@@ -197,16 +201,32 @@ def add_geo_data(dataset):
     dataset['lieu_statutdom'] += 1
     dataset['lieu_statutdc'] += 1
 
+    cause_chain_columns = []
+    for i in range(2, 25):
+        cause_chain_columns.append('c' + str(i))
+
+    other_columns = np.array(
+        dataset.columns[np.argwhere(np.logical_not(np.isin(dataset.columns, cause_chain_columns)))])[:, 0]
+
+    dataset = dataset.loc[~dataset[other_columns].isnull().any(1)]
+
     return dataset
 
-
-all_codes = pd.read_csv('data/cepidc_raw/all_codes_2013.csv', dtype=np.str)
-tout = pd.read_csv('data/cepidc_raw/tout_2013.csv', dtype=np.str)
+year = 2013
+print('beginning preprocessing for year ' + str(year))
+all_codes = pd.read_csv('data/cepidc_raw/all_codes_' + str(year) + '.csv', dtype=np.str)
+tout = pd.read_csv('data/cepidc_raw/tout_' + str(year) + '.csv', dtype=np.str)
 dataset = merge_and_delete_init_cause(all_codes, tout)
 dataset = clean_dataset(dataset)
 
-
 dataset = add_geo_data(dataset)
+
+if 'c24' not in dataset.columns:
+    dataset['c24'] = np.nan
+
+print(dataset.shape)
+print(dataset.isna().mean())
+print(dataset.isnull().mean())
 
 dataset = dataset.sample(frac=1)  # shuffle dataset
 
@@ -214,6 +234,36 @@ train = dataset.iloc[:-75000]
 valid = dataset.iloc[-75000:-37500]
 test = dataset.iloc[-37500:]
 
-train.to_csv('cepidc_2013_train.csv')
-valid.to_csv('cepidc_2013_valid.csv')
-test.to_csv('cepidc_2013_test.csv')
+train.to_csv('cepidc_' + str(year) + '_train.csv')
+valid.to_csv('cepidc_' + str(year) + '_valid.csv')
+test.to_csv('cepidc_' + str(year) + '_test.csv')
+true_columns = dataset.columns
+
+for year in range(2006, 2015):
+
+    if year != 2013:
+        print('beginning preprocessing for year ' + str(year))
+        all_codes = pd.read_csv('data/cepidc_raw/all_codes_' + str(year) + '.csv', dtype=np.str)
+        tout = pd.read_csv('data/cepidc_raw/tout_' + str(year) + '.csv', dtype=np.str)
+        dataset = merge_and_delete_init_cause(all_codes, tout)
+        dataset = clean_dataset(dataset)
+
+        dataset = add_geo_data(dataset)
+
+        if 'c24' not in dataset.columns:
+            dataset['c24'] = np.nan
+        dataset = dataset[true_columns]
+
+        dataset['etatmat'] = '0'
+        print(dataset.shape)
+        print(dataset.isna().mean())
+        print(dataset.isnull().mean())
+        dataset = dataset.sample(frac=1)  # shuffle dataset
+
+        train = dataset.iloc[:-75000]
+        valid = dataset.iloc[-75000:-37500]
+        test = dataset.iloc[-37500:]
+
+        train.to_csv('cepidc_' + str(year) + '_train.csv')
+        valid.to_csv('cepidc_' + str(year) + '_valid.csv')
+        test.to_csv('cepidc_' + str(year) + '_test.csv')
