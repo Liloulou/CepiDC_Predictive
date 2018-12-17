@@ -29,7 +29,7 @@ vocab_list = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J',
     'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T',
-    'U', 'V', 'W', 'X', 'Y', 'Z'
+    'U', 'V', 'W', 'X', 'Y', 'Z', '.'
 ]
 mean_dict = {
     'date_nais': [[1934.6344833246696], [6.395205434766596], [15.677822136824627]],
@@ -75,7 +75,7 @@ def _convert(tensor, key):
 
     if key in cause_name_list:
         split = tf.squeeze(
-            tf.sparse_to_dense(split.indices, [1, 4], split.values, default_value=''),
+            tf.sparse_to_dense(split.indices, [1, 4], split.values, default_value='.'),
             axis=0
         )
 
@@ -189,14 +189,39 @@ def really_simple_input_fn(dataset_name, batch_size, num_epochs):
     :return: a BatchedDataset as a tuple of a feature dictionary and the labels
     """
 
-    dataset = tf.data.TextLineDataset('cepidc_2013_' + dataset_name + '.csv').skip(1)
+    dataset = tf.data.TextLineDataset('dataset/cepidc_2013_' + dataset_name + '.csv').skip(1)
 
     dataset = dataset.map(_preprocess)
 
-    dataset = dataset.shuffle(buffer_size=10000).batch(batch_size, drop_remainder=True).repeat(num_epochs) #TODO put that back after testing
-    
-    dataset = dataset.prefetch(buffer_size=batch_size)
-    
+    #dataset = dataset.shuffle(buffer_size=10000).batch(batch_size, drop_remainder=True).repeat(num_epochs) #TODO put that back after testing
+    dataset = dataset.batch(batch_size, drop_remainder=True).repeat(num_epochs)
+
+    return dataset
+
+
+def really_simple_input_fn_multiple_csv(dataset_name, batch_size, num_epochs):
+    """
+    A predefined input function to feed an Estimator csv based cepidc files
+    :param dataset_name: the file's ending type (either 'train, 'valid' or 'test')
+    :param batch_size: the size of batches to feed the computational graph
+    :param num_epochs: the number of time the entire dataset should be exposed to a gradient descent iteration
+    :return: a BatchedDataset as a tuple of a feature dictionary and the labels
+    """
+
+    filenames = tf.constant(['data/cepidc_' + str(year) + '_' + dataset_name + '.csv' for year in range(2006, 2015)])
+
+    dataset = tf.data.Dataset.from_tensor_slices(['data/cepidc_' + str(year) + '_' + dataset_name + '.csv' for year in range(2006, 2015)])
+
+    dataset = dataset.interleave(
+        lambda filename: (
+            tf.data.TextLineDataset(filename).skip(1).map(_preprocess)
+        ),
+        cycle_length=9,
+    )
+
+    # dataset = dataset.shuffle(buffer_size=10000).batch(batch_size, drop_remainder=True).repeat(num_epochs) #TODO put that back after testing
+    dataset = dataset.batch(batch_size, drop_remainder=True).repeat(num_epochs)
+
     return dataset
 
 
@@ -275,17 +300,6 @@ def make_columns():
                 )
             ))
 
-        loc_cat_columns = []
-        with tf.name_scope('statut_columns'):
-
-            for key in loc_keys[0]:
-                loc_cat_columns.append(tf.feature_column.indicator_column(
-                    tf.feature_column.categorical_column_with_identity(
-                        key,
-                        num_buckets=bucket_sizes[key]
-                    )
-                ))
-
     # build feature_columns for miscellaneous variables
     with tf.name_scope('misc_columns'):
 
@@ -313,7 +327,7 @@ def make_columns():
 
         for key in cause_chain:
             cause_columns.append(tf.feature_column.indicator_column(
-                feature_column.sequence_categorical_column_with_vocabulary_list(key, vocab_list, default_value=0)))
+                feature_column.sequence_categorical_column_with_vocabulary_list(key, vocab_list)))
 
     # build feature column for the labels
     with tf.name_scope('labels_one_hot_encoding'):
@@ -353,10 +367,10 @@ def make_input_layers(dataset, feature_columns):
     features, labels = dataset
 
     with tf.name_scope('date_inputs'):
-        feature_dict['date'] = tf.reshape(
+        feature_dict['date'] = tf.transpose(tf.reshape(
             tf.feature_column.input_layer(features, feature_columns['date']),
             shape=[-1, 2, 3, 1]
-        )
+        ), perm=[0, 2, 1, 3])
 
     with tf.name_scope('loc_inputs'):
         feature_dict['loc'] = tf.stack(
@@ -389,3 +403,4 @@ def make_input_layers(dataset, feature_columns):
             {'labels': labels}, feature_columns['labels'], trainable=False)[0]
 
     return feature_dict, label_inputs
+
