@@ -60,6 +60,33 @@ dict_type = {'image': np.str,
              'AnNaisMere': np.str}
 
 
+def pre_preprocessing(tt, tt_2013):
+    """
+    Takes a tout dataset from a given year, and gets it to tout_2013 format
+    :param tt:
+    :param tt_2013:
+    :return:
+    """
+
+    new_tt = tt.copy()
+    columns_2013 = list(tt_2013.columns)
+    columns = list(tt.columns)
+
+    if 'etamat' in columns:
+        new_tt = new_tt.rename(columns={'etamat': 'etatmat'})
+        columns = list(new_tt.columns)
+
+    for col in columns:
+        if col not in columns_2013:
+            new_tt = new_tt.drop(col, axis=1)
+
+    for col in columns_2013:
+        if col not in columns:
+            new_tt[col] = np.nan
+
+    return new_tt
+
+
 def clean(tout):
     tout = tout.replace('NUL', '')
     tout = tout.replace('NU', '')
@@ -106,20 +133,25 @@ def merge_and_delete_init_cause(all_codes, tout):
 
 
 def clean_dataset(dataset):
-    dataset = dataset.drop(columns=[
-        'csp',
-        'depnais3',
-        'depdc3',
-        'depdom3',
-        'AnNaisMere',
-        '_NAME_',
-        'numcertificat',
-        'nat3',
-        'depnais',
-        'comnais',
-        'situat',
-        'agexact'
-    ],axis=1)
+    dataset = dataset.drop(
+        columns=[
+            'csp',
+            'depnais3',
+            'depdc3',
+            'depdom3',
+            'AnNaisMere',
+            '_NAME_',
+            'numcertificat',
+            'nat3',
+            'depnais',
+            'comnais',
+            'situat',
+            'agexact',
+            'activ',
+            'jvecus'
+        ],
+        axis=1
+    )
 
     cause_chain_columns = []
     for i in range(2, 25):
@@ -128,11 +160,9 @@ def clean_dataset(dataset):
     other_columns = np.array(
         dataset.columns[np.argwhere(np.logical_not(np.isin(dataset.columns, cause_chain_columns)))])[:, 0]
 
-    row_with_missing = dataset[other_columns].isnull()
-
-    dataset = dataset.loc[~row_with_missing.any(1)]
-
     dataset = dataset.loc[~dataset[other_columns].isnull().any(1)]
+    dataset = dataset.loc[~dataset[other_columns].isna().any(1)]
+    dataset = dataset.loc[~(dataset[other_columns] == '').any(1)]
 
     return dataset
 
@@ -152,6 +182,22 @@ def test_correctness(init_data, final_data):
     test = np.array(init_subset) == np.array(final_data[other_columns])
 
     return np.logical_and.reduce(test, axis=None)
+
+
+def add_jvecus(dc, nais):
+    """
+
+    :param dc: a pandas DataFrame with 3 columns 'adc', 'mdc', 'jdc'
+    :param nais: a pandas DataFrame with 3 columns 'anais', 'mnais', 'jnais'
+    :return:
+    """
+
+    date_dc = dc['adc'] + '-' + dc['mdc'] + '-' + dc['jdc']
+    date_nais = nais['anais'] + '-' + nais['mnais'] + '-' + nais['jnais']
+    date_dc = pd.to_datetime(date_dc)
+    date_nais = pd.to_datetime(date_nais)
+
+    return (date_dc - date_nais).dt.days
 
 
 def add_fdep(dataset):
@@ -212,13 +258,15 @@ def add_geo_data(dataset):
 
     return dataset
 
+
 year = 2013
 print('beginning preprocessing for year ' + str(year))
 all_codes = pd.read_csv('data/cepidc_raw/all_codes_' + str(year) + '.csv', dtype=np.str)
 tout = pd.read_csv('data/cepidc_raw/tout_' + str(year) + '.csv', dtype=np.str)
+tout_2013 = tout.copy()
 dataset = merge_and_delete_init_cause(all_codes, tout)
 dataset = clean_dataset(dataset)
-
+dataset['jvecus'] = add_jvecus(dataset[['adc', 'mdc', 'jdc']], dataset[['anais', 'mnais', 'jnais']])
 dataset = add_geo_data(dataset)
 
 if 'c24' not in dataset.columns:
@@ -245,16 +293,17 @@ for year in range(2006, 2015):
         print('beginning preprocessing for year ' + str(year))
         all_codes = pd.read_csv('data/cepidc_raw/all_codes_' + str(year) + '.csv', dtype=np.str)
         tout = pd.read_csv('data/cepidc_raw/tout_' + str(year) + '.csv', dtype=np.str)
+        tout = pre_preprocessing(tout, tout_2013)
         dataset = merge_and_delete_init_cause(all_codes, tout)
         dataset = clean_dataset(dataset)
-
+        dataset['jvecus'] = add_jvecus(dataset[['adc', 'mdc', 'jdc']], dataset[['anais', 'mnais', 'jnais']])
         dataset = add_geo_data(dataset)
 
         if 'c24' not in dataset.columns:
             dataset['c24'] = np.nan
+
         dataset = dataset[true_columns]
 
-        dataset['etatmat'] = '0'
         print(dataset.shape)
         print(dataset.isna().mean())
         print(dataset.isnull().mean())
